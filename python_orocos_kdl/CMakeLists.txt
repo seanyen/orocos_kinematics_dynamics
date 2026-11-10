@@ -1,52 +1,66 @@
-cmake_minimum_required(VERSION 3.0.2)
+cmake_minimum_required(VERSION 3.20)
 if(POLICY CMP0048)
   cmake_policy(SET CMP0048 NEW)
+endif()
+# Avoid warning from pybind11 on Windows
+if(POLICY CMP0054)
+  cmake_policy(SET CMP0054 NEW)
 endif()
 if(POLICY CMP0057)
   cmake_policy(SET CMP0057 NEW)  # support IN_LISTS which is required for PyBind11 2.6 and newer
 endif()
+# CMake policy CMP0094 controls how Python versions are found;
+# the OLD policy was to find the newest one, while the new policy
+# is to stop after finding the first one.  We want to find the first
+# one, so be sure to set that policy here.
+if(POLICY CMP0094)
+  cmake_policy(SET CMP0094 NEW)
+endif()
+# The default for Python3_FIND_UNVERSIONED_NAMES is LAST, which
+# means find_package(Python3) will prefer to find /usr/bin/python3.11
+# over /usr/bin/python3.  We actually prefer to find the system version,
+# so set this to FIRST.
+set(Python3_FIND_UNVERSIONED_NAMES FIRST)
 
-project(python_orocos_kdl VERSION 1.5.1)
+project(python_orocos_kdl VERSION 1.5.4)
 
 # find a matching version of orocos_kdl
 find_package(orocos_kdl ${PROJECT_VERSION} EXACT REQUIRED)
 include_directories(${orocos_kdl_INCLUDE_DIRS})
 link_directories(${orocos_kdl_LIBRARY_DIRS})
 
-if(DEFINED ENV{ROS_PYTHON_VERSION})
-  SET(PYTHON_VERSION $ENV{ROS_PYTHON_VERSION} CACHE STRING "Python Version")
-else()
-  SET(PYTHON_VERSION 3 CACHE STRING "Python Version")
-endif()
-
-set(PYBIND11_PYTHON_VERSION ${PYTHON_VERSION} CACHE STRING "Python version used by PyBind11")
-
-find_package(PythonInterp ${PYTHON_VERSION} REQUIRED)
-find_package(PythonLibs ${PYTHON_VERSION_MAJOR}.${PYTHON_VERSION_MINOR} REQUIRED)
+# Note: this find_package must stay ahead of the pybind11 subdirectory/package below.
+# pybind11 only runs its own find_package(Python ...) when neither Python_FOUND nor
+# Python3_FOUND is set, so this call is the single place where the minimum Python
+# version for PyKDL is enforced.
+find_package(Python3 3.10 COMPONENTS Interpreter Development REQUIRED)
 # get_python_lib in python3 produces path which isn't in sys.path: https://bugs.launchpad.net/ubuntu/+source/python3-stdlib-extensions/+bug/1832215
 # execute_process(COMMAND ${PYTHON_EXECUTABLE} -c "from distutils.sysconfig import get_python_lib; print(get_python_lib(plat_specific=True, prefix=''))" OUTPUT_VARIABLE PYTHON_SITE_PACKAGES OUTPUT_STRIP_TRAILING_WHITESPACE)
-set(PYTHON_SITE_PACKAGES_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/lib/python${PYTHON_VERSION_MAJOR}.${PYTHON_VERSION_MINOR}/dist-packages")  # This might be overridden below if built with catkin.
+set(PYTHON_SITE_PACKAGES_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/lib/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/dist-packages" CACHE STRING "Install location of the python package")  # This might be overridden below if built with ament.
 set(LIBRARY_NAME "PyKDL")
 
-# catkin-specific configuration (optional)
-find_package(catkin QUIET)
-if(catkin_FOUND)
-  catkin_package(
-    SKIP_CMAKE_CONFIG_GENERATION
-    SKIP_PKG_CONFIG_GENERATION
-  )
-  set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CATKIN_DEVEL_PREFIX}/${PYTHON_INSTALL_DIR})
-  set(PYTHON_SITE_PACKAGES_INSTALL_DIR "${PYTHON_INSTALL_DIR}")
+# ament-specific configuration (optional)
+# ament_package() has to be called after all targets and install() rules, so it
+# lives at the end of this file together with the environment hook.
+if(DEFINED ENV{ROS_VERSION} AND "$ENV{ROS_VERSION}" STREQUAL "2")
+  find_package(ament_cmake QUIET)
+  if(ament_cmake_FOUND)
+    find_package(ament_cmake_python REQUIRED)
+    # ament_cmake_python knows the install prefix-relative site-packages
+    # directory ROS 2 uses; ask it rather than reconstructing the layout here.
+    ament_get_python_install_dir(PYTHON_INSTALL_DIR)
+    set(PYTHON_SITE_PACKAGES_INSTALL_DIR "${PYTHON_INSTALL_DIR}")
+  endif()
 endif()
 
 # Build the module
-if(WIN32)
-  set(PYTHON_MODULE_EXTENSION ".pyd")
+find_package(pybind11 3.0 QUIET)
+if(NOT ${pybind11_FOUND})
+  message(STATUS "pybind11 not found, building from source")
+  add_subdirectory(pybind11)
 else()
-  set(PYTHON_MODULE_EXTENSION ".so")
+  message(STATUS "pybind11 found, building against installed version")
 endif()
-
-add_subdirectory(pybind11)
 pybind11_add_module(${LIBRARY_NAME}
   PyKDL/PyKDL.h
   PyKDL/PyKDL.cpp
@@ -56,3 +70,31 @@ pybind11_add_module(${LIBRARY_NAME}
   PyKDL/dynamics.cpp)
 target_link_libraries(${LIBRARY_NAME} PRIVATE ${orocos_kdl_LIBRARIES})
 install(TARGETS ${LIBRARY_NAME} DESTINATION "${PYTHON_SITE_PACKAGES_INSTALL_DIR}")
+
+# Tests
+option(ENABLE_TESTS "Enable building of tests" OFF)
+if(ENABLE_TESTS)
+  enable_testing()
+  # PyKDLtest.py imports its cases as top level modules, so it has to run from
+  # tests/. PYTHONPATH points at the freshly built module rather than an
+  # installed one; psutil comes from the interpreter's own site-packages.
+  add_test(NAME PyKDLtest
+    COMMAND ${CMAKE_COMMAND} -E env
+      "PYTHONPATH=$<TARGET_FILE_DIR:${LIBRARY_NAME}>"
+      ${Python3_EXECUTABLE} PyKDLtest.py
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+endif()
+
+# ament-specific configuration (optional)
+# Unlike catkin, ament does not put site-packages on the PYTHONPATH by itself,
+# so register an environment hook that does. The .dsv descriptor lets colcon
+# generate the equivalent for every shell it supports.
+# This only takes effect because package.xml declares the ament_cmake build
+# type; under the plain cmake build type colcon overwrites the generated
+# package.dsv and the hook is never sourced.
+if(ament_cmake_FOUND)
+  set(AMENT_CMAKE_ENVIRONMENT_HOOKS_DESC_pythonpath
+    "prepend-non-duplicate;PYTHONPATH;${PYTHON_INSTALL_DIR}")
+  ament_environment_hooks("cmake/environment_hook/pythonpath.sh.in")
+  ament_package()
+endif()

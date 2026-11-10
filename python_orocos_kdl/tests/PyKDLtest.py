@@ -1,4 +1,4 @@
-#! /usr/bin/env python
+#! /usr/bin/env python3
 # Copyright  (C)  2007  Ruben Smits <ruben dot smits at intermodalics dot eu>
 
 # Version: 1.0
@@ -28,19 +28,14 @@ import kinfamtest
 import framestest
 import frameveltest
 
-import sys
-
 suite = unittest.TestSuite()
 suite.addTest(dynamicstest.suite())
 suite.addTest(framestest.suite())
 suite.addTest(frameveltest.suite())
 suite.addTest(kinfamtest.suite())
 
-if sys.version_info < (3, 0):
-    import jointtypetest
-    suite.addTest(jointtypetest.suite())
-
 if __name__ == "__main__":
+    import sys
     result = unittest.TextTestRunner(verbosity=3).run(suite)
 
     if result.wasSuccessful():

@@ -22,13 +22,10 @@
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 
-from builtins import range
-
 import gc
 import psutil
 from PyKDL import *
 import random
-import sys
 import unittest
 
 
@@ -156,6 +153,41 @@ class KinfamTestFunctions(unittest.TestCase):
         with self.assertRaises(IndexError):
             ja[3] = 1
 
+    def testChainGetSegment(self):
+        n = self.chain.getNrOfSegments()
+        self.assertEqual(n, 9)
+        for i in range(n):
+            self.assertIsInstance(self.chain.getSegment(i), Segment)
+        self.assertEqual(self.chain.getSegment(0).getJoint().getType(), Joint.RotZ)
+        self.assertEqual(self.chain.getSegment(1).getFrameToTip(), Frame(Vector(0.0, 0.0, 0.9)))
+        self.assertEqual(self.chain.getSegment(n - 1).getJoint().getType(), Joint.Fixed)
+        with self.assertRaises(IndexError):
+            self.chain.getSegment(-1)
+        with self.assertRaises(IndexError):
+            self.chain.getSegment(n)
+        with self.assertRaises(IndexError):
+            Chain().getSegment(0)
+
+    def testChainDeleteSegmentsFrom(self):
+        chain = Chain(self.chain)
+        n_segments = chain.getNrOfSegments()
+        n_joints = chain.getNrOfJoints()
+        self.assertEqual(chain.deleteSegmentsFrom(n_segments), 0)
+        self.assertEqual(chain.deleteSegmentsFrom("non existent"), 0)
+        # the last two segments: TransY and Fixed
+        self.assertEqual(chain.deleteSegmentsFrom(n_segments - 2), 2)
+        self.assertEqual(chain.getNrOfSegments(), n_segments - 2)
+        self.assertEqual(chain.getNrOfJoints(), n_joints - 1)
+        self.assertEqual(self.chain.getNrOfSegments(), n_segments)
+
+        chain = Chain()
+        chain.addSegment(Segment("a", Joint(Joint.RotZ)))
+        chain.addSegment(Segment("b", Joint(Joint.RotX)))
+        chain.addSegment(Segment("c", Joint(Joint.Fixed)))
+        self.assertEqual(chain.deleteSegmentsFrom("b"), 2)
+        self.assertEqual(chain.getNrOfSegments(), 1)
+        self.assertEqual(chain.getNrOfJoints(), 1)
+
     def testFkPosAndJac(self):
         deltaq = 1E-4
         epsJ = 1E-4
@@ -229,7 +261,7 @@ class KinfamTestFunctions(unittest.TestCase):
         epsJ = 1e-7
         self.testFkVelAndIkVelImpl(self.fksolvervel, self.iksolvervel_givens, epsJ)
 
-    def testFkPosAndIkPosImpl(self, fksolverpos, iksolverpos, epsJ):
+    def testFkPosAndIkPosImpl(self, fksolverpos, iksolverpos):
         q = JntArray(self.chain.getNrOfJoints())
         for i in range(q.rows()):
             q[i] = random.uniform(-3.14, 3.14)
@@ -247,16 +279,105 @@ class KinfamTestFunctions(unittest.TestCase):
         self.assertTrue(0 == iksolverpos.CartToJnt(q_init, F1, q_solved))
         self.assertTrue(0 == fksolverpos.JntToCart(q_solved, F2))
 
+        # Only the resulting pose can be checked. Inverse position kinematics is a many-to-one
+        # mapping: the same pose is reached by infinitely many joint configurations, e.g. those
+        # differing by a multiple of 2*pi or an equivalent "flipped" configuration. The
+        # Newton-Raphson solver is a local method, so it returns whichever solution its iteration
+        # converges to, which is not necessarily the configuration q was seeded from, even though
+        # q_init lies close to q. Asserting Equal(q, q_solved) therefore fails for a small
+        # fraction of the random configurations. The equivalent C++ test in
+        # orocos_kdl/tests/solvertest.cpp deliberately does not assert it either.
         self.assertEqual(F1, F2)
-        self.assertTrue(Equal(q, q_solved, epsJ), "{} != {}".format(q, q_solved))
 
     def testFkPosAndIkPos(self):
-        epsJ = 1e-3
-        self.testFkPosAndIkPosImpl(self.fksolverpos, self.iksolverpos, epsJ)
+        self.testFkPosAndIkPosImpl(self.fksolverpos, self.iksolverpos)
 
     def testFkPosAndIkPosGivens(self):
-        epsJ = 1e-3
-        self.testFkPosAndIkPosImpl(self.fksolverpos, self.iksolverpos_givens, epsJ)
+        self.testFkPosAndIkPosImpl(self.fksolverpos, self.iksolverpos_givens)
+
+    def testIkPosEquivalentSolution(self):
+        """
+        Regression test for the intermittent failure of testFkPosAndIkPos.
+
+        With these seeds ChainIkSolverPos_NR converges (returning E_NOERROR) onto a
+        configuration that reaches the goal pose exactly, but differs from the original joint
+        values by a multiple of pi. Comparing the joint values rejected those valid solutions,
+        which made the test fail for roughly 1 in 1500 random configurations. Seeding makes
+        those configurations deterministic, so re-introducing such a comparison fails here
+        immediately rather than intermittently.
+        """
+        # Restore the generator afterwards, so the other randomized tests stay random.
+        self.addCleanup(random.setstate, random.getstate())
+        for seed, iksolverpos in ((1084, self.iksolverpos), (1175, self.iksolverpos_givens)):
+            random.seed(seed)
+            self.testFkPosAndIkPosImpl(self.fksolverpos, iksolverpos)
+
+    def testIkPosLMAWeighted(self):
+        """
+        The weighted constructor takes L as a plain sequence of 6 doubles, so that PyKDL does not
+        need numpy at runtime. Both constructors must reach the same solution for a reachable pose.
+        """
+        L = [1.0, 1.0, 1.0, 0.01, 0.01, 0.01]  # the default weights of the other constructor
+        iksolverpos_lma = ChainIkSolverPos_LMA(self.chain, L)
+        iksolverpos_lma_default = ChainIkSolverPos_LMA(self.chain)
+
+        q = JntArray(self.chain.getNrOfJoints())
+        for i in range(q.rows()):
+            q[i] = random.uniform(-3.14, 3.14)
+
+        F_goal = Frame.Identity()
+        self.assertEqual(0, self.fksolverpos.JntToCart(q, F_goal))
+
+        q_init = JntArray(self.chain.getNrOfJoints())
+        for i in range(q_init.rows()):
+            q_init[i] = q[i] + 0.1 * random.random()
+
+        q_weighted = JntArray(q.rows())
+        q_default = JntArray(q.rows())
+        self.assertEqual(0, iksolverpos_lma.CartToJnt(q_init, F_goal, q_weighted))
+        self.assertEqual(0, iksolverpos_lma_default.CartToJnt(q_init, F_goal, q_default))
+        self.assertTrue(Equal(q_weighted, q_default, 1e-3),
+                        "{} != {}".format(q_weighted, q_default))
+
+        # A tuple is accepted too, and a wrong length is reported rather than read past the end
+        ChainIkSolverPos_LMA(self.chain, tuple(L))
+        with self.assertRaises(ValueError):
+            ChainIkSolverPos_LMA(self.chain, [1.0, 1.0, 1.0])
+
+    def testFkPosVect(self):
+        epsC = 1e-5
+    
+        q = JntArray(self.chain.getNrOfJoints())
+
+        for i in range(q.rows()):
+            q[i] = random.uniform(-0.99, 0.99)
+
+        v_out: list[Frame | None] = [None] * self.chain.getNrOfSegments()  # Initialize with None to avoid the overhead of creating Frame objects for unused entries
+        f_out = Frame()
+        self.assertEqual(self.fksolverpos.JntToCart(q, f_out), 0)
+        self.assertEqual(self.fksolverpos.JntToCart(q, v_out), 0)
+
+        self.assertEqual(len(v_out), self.chain.getNrOfSegments())
+        self.assertTrue(Equal(v_out[self.chain.getNrOfSegments() - 1], f_out, epsC))
+
+    def testFkVelVect(self):
+        epsC = 1e-5
+    
+        q = JntArray(self.chain.getNrOfJoints())
+        qdot = JntArray(self.chain.getNrOfJoints())
+
+        for i in range(q.rows()):
+            q[i] = random.uniform(-0.99, 0.99)
+            qdot[i] = random.uniform(-0.99, 0.99)
+
+        v_out: list[FrameVel | None] = [None] * self.chain.getNrOfSegments()  # Using None as placeholders avoids the overhead of creating multiple FrameVel objects upfront.
+        f_out = FrameVel()
+        q_vel = JntArrayVel(q, qdot)
+        self.assertEqual(self.fksolvervel.JntToCart(q_vel, f_out), 0)
+        self.assertEqual(self.fksolvervel.JntToCart(q_vel, v_out), 0)
+
+        self.assertEqual(len(v_out), self.chain.getNrOfSegments())
+        self.assertTrue(Equal(v_out[self.chain.getNrOfSegments() - 1], f_out, epsC))
 
     def compare_Jdot_Diff_vs_Solver(self, dt, representation):
         NrOfJoints = self.chain.getNrOfJoints()
@@ -332,6 +453,18 @@ class KinfamTestTree(unittest.TestCase):
         self.tree.addSegment(Segment(Joint(Joint.Fixed),
                                      Frame(Vector(0.0, 0.0, 0.0))), "bar")
 
+    def testTreeDeleteSegmentsFrom(self):
+        tree = Tree("root")
+        tree.addSegment(Segment("S1", Joint(Joint.RotX)), "root")
+        tree.addSegment(Segment("S2", Joint(Joint.RotX)), "S1")
+        tree.addSegment(Segment("S3", Joint(Joint.Fixed)), "S2")
+        tree.addSegment(Segment("S4", Joint(Joint.RotY)), "root")
+        self.assertEqual(tree.deleteSegmentsFrom("root"), 0)
+        self.assertEqual(tree.deleteSegmentsFrom("non existent"), 0)
+        self.assertEqual(tree.deleteSegmentsFrom("S2"), 2)
+        self.assertEqual(tree.getNrOfSegments(), 2)
+        self.assertEqual(tree.getNrOfJoints(), 2)
+
     def testTreeGetChainMemLeak(self):
         # test for the memory leak in Tree.getChain described in issue #211
         process = psutil.Process()
@@ -352,18 +485,26 @@ def suite():
     suite.addTest(KinfamTestFunctions('testRotationalInertia'))
     suite.addTest(KinfamTestFunctions('testJacobian'))
     suite.addTest(KinfamTestFunctions('testJntArray'))
+    suite.addTest(KinfamTestFunctions('testChainGetSegment'))
+    suite.addTest(KinfamTestFunctions('testChainDeleteSegmentsFrom'))
     suite.addTest(KinfamTestFunctions('testFkPosAndJac'))
     suite.addTest(KinfamTestFunctions('testFkVelAndJac'))
     suite.addTest(KinfamTestFunctions('testFkVelAndIkVel'))
     suite.addTest(KinfamTestFunctions('testFkVelAndIkVelGivens'))
     suite.addTest(KinfamTestFunctions('testFkPosAndIkPos'))
     suite.addTest(KinfamTestFunctions('testFkPosAndIkPosGivens'))
+    suite.addTest(KinfamTestFunctions('testIkPosEquivalentSolution'))
+    suite.addTest(KinfamTestFunctions('testIkPosLMAWeighted'))
+    suite.addTest(KinfamTestFunctions('testFkPosVect'))
+    suite.addTest(KinfamTestFunctions('testFkVelVect'))
     suite.addTest(KinfamTestFunctions('testJacDot'))
+    suite.addTest(KinfamTestTree('testTreeDeleteSegmentsFrom'))
     suite.addTest(KinfamTestTree('testTreeGetChainMemLeak'))
     return suite
 
 
 if __name__ == '__main__':
+    import sys
     suite = suite()
     result = unittest.TextTestRunner(verbosity=3).run(suite)
 

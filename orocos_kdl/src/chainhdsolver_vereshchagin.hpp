@@ -311,7 +311,7 @@ namespace KDL
  * simulate constraint forces in certain situations, however, there, final derivation of this principle in the software is different. However, in
  * the case of this more advanced forward dynamics computations, the user needs to be aware of prioritizations between input interfaces
  * (mentioned in "Prioritizations" section above) and internal policies on
- * handling singularities (mentioned in "Singularities and matrix inversions" section bellow).
+ * handling singularities (mentioned in "Singularities and matrix inversions" section below).
  *
  * ### Singularities and matrix inversions
  *
@@ -363,7 +363,7 @@ namespace KDL
  * @ingroup KinematicFamily
  */
 
-class ChainHdSolver_Vereshchagin : KDL::SolverI
+class ChainHdSolver_Vereshchagin : public KDL::SolverI
 {
     typedef std::vector<Twist> Twists;
     typedef std::vector<Frame> Frames;
@@ -414,7 +414,7 @@ public:
     void getTotalTorque(JntArray &total_tau);
 
     // Returns magnitude of the constraint forces acting on the end-effector: Lagrange Multiplier
-    void getContraintForceMagnitude(Eigen::VectorXd &nu_);
+    void getConstraintForceMagnitude(Eigen::VectorXd &nu_);
 
     /*
     //Returns cartesian positions of links in base coordinates

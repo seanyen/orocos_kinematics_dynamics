@@ -22,6 +22,12 @@
 
 namespace KDL {
 
+const int ChainExternalWrenchEstimator::E_FKSOLVERPOS_FAILED;
+const int ChainExternalWrenchEstimator::E_JACSOLVER_FAILED;
+const int ChainExternalWrenchEstimator::E_DYNPARAMSOLVERMASS_FAILED;
+const int ChainExternalWrenchEstimator::E_DYNPARAMSOLVERCORIOLIS_FAILED;
+const int ChainExternalWrenchEstimator::E_DYNPARAMSOLVERGRAVITY_FAILED;
+
 ChainExternalWrenchEstimator::ChainExternalWrenchEstimator(const Chain &chain, const Vector &gravity, const double sample_frequency, const double estimation_gain, const double filter_constant, const double eps, const int maxiter) :
     CHAIN(chain),
     DT_SEC(1.0 / sample_frequency), FILTER_CONST(filter_constant),
@@ -48,6 +54,9 @@ void ChainExternalWrenchEstimator::updateInternalDataStructures()
     ns = CHAIN.getNrOfSegments();
     jnt_mass_matrix.resize(nj);
     previous_jnt_mass_matrix.resize(nj);
+    // The chain has changed, so the previously saved mass matrix is no longer valid.
+    // Setting it to zero makes JntToExtWrench() re-initialize it on the next call.
+    previous_jnt_mass_matrix.data.setZero();
     jnt_mass_matrix_dot.resize(nj);
     initial_jnt_momentum.resize(nj);
     estimated_momentum_integral.resize(nj);
@@ -86,6 +95,10 @@ int ChainExternalWrenchEstimator::setInitialMomentum(const JntArray &joint_posit
     // Reset data because of the new momentum offset
     SetToZero(estimated_momentum_integral);
     SetToZero(filtered_estimated_ext_torque);
+
+    // Initialize the mass matrix used by the finite-difference computation of its derivative,
+    // to avoid a spike in the first estimation step
+    previous_jnt_mass_matrix = jnt_mass_matrix;
 
     return (error = E_NOERROR);
 }
@@ -129,6 +142,12 @@ int ChainExternalWrenchEstimator::JntToExtWrench(const JntArray &joint_position,
     // Calculate decomposed robot's dynamics
     if (E_NOERROR != dynparam_solver.JntToMass(joint_position, jnt_mass_matrix))
         return (error = E_DYNPARAMSOLVERMASS_FAILED);
+
+    // A zero matrix is not a valid inertia matrix, so it indicates that there is no
+    // previously saved mass matrix yet (the user is not required to call setInitialMomentum()).
+    // Use the current mass matrix instead, to avoid a spike in the mass matrix derivative below.
+    if (previous_jnt_mass_matrix.data.isZero())
+        previous_jnt_mass_matrix.data = jnt_mass_matrix.data;
 
     if (E_NOERROR != dynparam_solver.JntToCoriolis(joint_position, joint_velocity, coriolis_torque))
         return (error = E_DYNPARAMSOLVERCORIOLIS_FAILED);
